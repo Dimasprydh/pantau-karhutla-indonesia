@@ -1,6 +1,5 @@
 window.PANTAU_CONFIG = {
-  // Isi dengan URL Cloudflare Worker setelah backend selesai di-deploy.
-  // Contoh: "https://pantau-karhutla-api.username.workers.dev"
-  // Jangan pernah menaruh NASA FIRMS MAP_KEY di file frontend.
-  apiUrl: ""
+  // API publik Cloudflare Worker. NASA FIRMS MAP_KEY tetap disimpan di Cloudflare,
+  // tidak pernah dimasukkan ke source code frontend.
+  apiUrl: "https://pantau-karhutla-indonesia.dimasajah211.workers.dev"
 };
