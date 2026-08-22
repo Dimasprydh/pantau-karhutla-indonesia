@@ -1,7 +1,8 @@
 const SOURCES = [
   "VIIRS_NOAA20_NRT",
   "VIIRS_NOAA21_NRT",
-  "VIIRS_SNPP_NRT"
+  "VIIRS_SNPP_NRT",
+  "MODIS_NRT"
 ];
 
 const INDONESIA_BBOX = "94,-11,142,7";
@@ -23,102 +24,111 @@ export default {
     if (url.pathname === "/health") {
       return json({
         ok: true,
-        service: "pantau-karhutla-api",
+        service: "pantau-karhutla-indonesia",
         firmsConfigured: Boolean(env.FIRMS_MAP_KEY),
         sources: SOURCES,
-        cacheSeconds: CACHE_SECONDS
+        cacheSeconds: CACHE_SECONDS,
+        now: new Date().toISOString()
       });
     }
 
     if (url.pathname !== "/api/hotspots") {
-      return json({
-        ok: true,
-        message: "Pantau Karhutla Indonesia API",
-        endpoints: ["/health", "/api/hotspots?days=1"]
-      });
+      return env.ASSETS.fetch(request);
     }
 
     if (!env.FIRMS_MAP_KEY) {
       return json({
         error: "FIRMS_MAP_KEY is not configured",
-        hint: "Run: wrangler secret put FIRMS_MAP_KEY"
+        message: "NASA FIRMS credential belum tersedia pada Worker."
       }, 503);
     }
 
-    const days = clampInt(url.searchParams.get("days") || "1", 1, 5);
-    const cacheKey = new Request(`${url.origin}/api/hotspots?days=${days}`, { method: "GET" });
+    const hours = clampInt(url.searchParams.get("hours") || "24", 1, 96);
+    const dayRange = Math.min(5, Math.max(2, Math.ceil(hours / 24) + 1));
+    const cacheKey = new Request(`${url.origin}/api/hotspots?hours=${hours}`, { method: "GET" });
     const cache = caches.default;
     const cached = await cache.match(cacheKey);
     if (cached) return withCors(cached);
 
-    try {
-      const settled = await Promise.allSettled(
-        SOURCES.map(source => fetchSource(env.FIRMS_MAP_KEY, source, days))
-      );
+    const settled = await Promise.allSettled(
+      SOURCES.map(source => fetchSource(env.FIRMS_MAP_KEY, source, dayRange))
+    );
 
-      const detections = [];
-      const errors = [];
+    const detections = [];
+    const errors = [];
 
-      settled.forEach((result, index) => {
-        if (result.status === "fulfilled") {
-          detections.push(...result.value);
-        } else {
-          errors.push({ source: SOURCES[index], message: result.reason?.message || "Unknown upstream error" });
-        }
-      });
-
-      if (!detections.length && errors.length === SOURCES.length) {
-        return json({ error: "All FIRMS sources failed", upstream: errors }, 502);
+    settled.forEach((result, index) => {
+      if (result.status === "fulfilled") {
+        detections.push(...result.value);
+      } else {
+        errors.push({
+          source: SOURCES[index],
+          message: result.reason?.message || "Unknown upstream error"
+        });
       }
+    });
 
-      const deduped = dedupeDetections(detections)
-        .sort((a, b) => new Date(b.acquiredAt) - new Date(a.acquiredAt));
-
-      const payload = {
-        ok: true,
-        source: "NASA FIRMS",
-        mode: "near-real-time",
-        generatedAt: new Date().toISOString(),
-        days,
-        bbox: INDONESIA_BBOX,
-        count: deduped.length,
-        detections: deduped,
-        upstreamWarnings: errors
-      };
-
-      const response = new Response(JSON.stringify(payload), {
-        status: 200,
-        headers: {
-          ...corsHeaders(),
-          "content-type": "application/json; charset=utf-8",
-          "cache-control": `public, max-age=120, s-maxage=${CACHE_SECONDS}`
-        }
-      });
-
-      ctx.waitUntil(cache.put(cacheKey, response.clone()));
-      return response;
-    } catch (error) {
-      return json({ error: "Unable to load FIRMS data", message: error.message }, 502);
+    if (!detections.length && errors.length === SOURCES.length) {
+      return json({
+        error: "All FIRMS sources failed",
+        message: "Semua sumber NASA FIRMS gagal dimuat.",
+        upstream: errors
+      }, 502);
     }
+
+    const now = Date.now();
+    const cutoff = now - hours * 60 * 60 * 1000;
+    const filtered = dedupeDetections(detections)
+      .filter(item => {
+        const t = new Date(item.acquiredAt).getTime();
+        return Number.isFinite(t) && t >= cutoff && t <= now + 10 * 60 * 1000;
+      })
+      .sort((a, b) => new Date(b.acquiredAt) - new Date(a.acquiredAt));
+
+    const payload = {
+      ok: true,
+      source: "NASA FIRMS",
+      mode: "near-real-time",
+      generatedAt: new Date().toISOString(),
+      lookbackHours: hours,
+      requestedDayRange: dayRange,
+      bbox: INDONESIA_BBOX,
+      sources: SOURCES,
+      count: filtered.length,
+      detections: filtered,
+      upstreamWarnings: errors
+    };
+
+    const response = new Response(JSON.stringify(payload), {
+      status: 200,
+      headers: {
+        ...corsHeaders(),
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": `public, max-age=120, s-maxage=${CACHE_SECONDS}`
+      }
+    });
+
+    ctx.waitUntil(cache.put(cacheKey, response.clone()));
+    return response;
   }
 };
 
-async function fetchSource(mapKey, source, days) {
-  const endpoint = `${FIRMS_BASE}/${encodeURIComponent(mapKey)}/${source}/${INDONESIA_BBOX}/${days}`;
-  const response = await fetch(endpoint, {
-    headers: {
-      Accept: "text/csv",
-      "User-Agent": "Pantau-Karhutla-Indonesia/1.0"
-    }
-  });
+async function fetchSource(mapKey, source, dayRange) {
+  const endpoint = `${FIRMS_BASE}/${encodeURIComponent(mapKey)}/${source}/${INDONESIA_BBOX}/${dayRange}`;
+  const response = await fetch(endpoint, { headers: { Accept: "text/csv" } });
 
   if (!response.ok) {
     throw new Error(`${source} returned HTTP ${response.status}`);
   }
 
   const text = await response.text();
-  if (!text.trim() || text.trim().startsWith("<")) {
+  const trimmed = text.trim();
+  if (!trimmed || trimmed.startsWith("<")) {
     throw new Error(`${source} returned an invalid CSV response`);
+  }
+
+  if (/invalid map_key|invalid source|error in processing/i.test(trimmed.slice(0, 300))) {
+    throw new Error(`${source}: ${trimmed.slice(0, 160)}`);
   }
 
   const rows = parseCsv(text);
@@ -134,12 +144,9 @@ function normalizeRow(row, source, index) {
   const rawTime = String(row.acq_time || "").trim().padStart(4, "0");
   const hour = rawTime.slice(0, 2);
   const minute = rawTime.slice(2, 4);
-  const acquiredAt = /^\d{4}-\d{2}-\d{2}$/.test(date)
-    ? `${date}T${hour}:${minute}:00Z`
-    : new Date().toISOString();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^\d{4}$/.test(rawTime)) return null;
 
-  const satellite = normalizeSatellite(row.satellite, source);
-  const confidence = normalizeConfidence(row.confidence);
+  const acquiredAt = `${date}T${hour}:${minute}:00Z`;
   const frp = Number(row.frp);
 
   return {
@@ -147,12 +154,13 @@ function normalizeRow(row, source, index) {
     latitude,
     longitude,
     acquiredAt,
-    satellite,
-    instrument: String(row.instrument || "VIIRS"),
-    confidence,
+    satellite: normalizeSatellite(row.satellite, source),
+    instrument: String(row.instrument || (source.startsWith("MODIS") ? "MODIS" : "VIIRS")),
+    confidence: normalizeConfidence(row.confidence),
     frp: Number.isFinite(frp) ? frp : null,
     daynight: row.daynight || null,
-    source: "NASA FIRMS"
+    source: "NASA FIRMS",
+    dataset: source
   };
 }
 
@@ -161,6 +169,8 @@ function normalizeSatellite(value, source) {
   if (raw.includes("N20") || source.includes("NOAA20")) return "NOAA-20";
   if (raw.includes("N21") || source.includes("NOAA21")) return "NOAA-21";
   if (raw.includes("NPP") || source.includes("SNPP")) return "Suomi-NPP";
+  if (raw === "T" || raw.includes("TERRA")) return "Terra";
+  if (raw === "A" || raw.includes("AQUA")) return "Aqua";
   return String(value || source);
 }
 
@@ -169,7 +179,6 @@ function normalizeConfidence(value) {
   if (["h", "high"].includes(raw)) return "high";
   if (["n", "nominal", "medium"].includes(raw)) return "nominal";
   if (["l", "low"].includes(raw)) return "low";
-
   const numeric = Number(raw);
   if (Number.isFinite(numeric)) {
     if (numeric >= 80) return "high";
@@ -182,34 +191,23 @@ function normalizeConfidence(value) {
 function dedupeDetections(items) {
   const seen = new Set();
   const output = [];
-
   for (const item of items) {
-    const key = [
-      item.satellite,
-      item.acquiredAt,
-      item.latitude.toFixed(4),
-      item.longitude.toFixed(4)
-    ].join("|");
-
+    const key = [item.dataset, item.satellite, item.acquiredAt, item.latitude.toFixed(4), item.longitude.toFixed(4)].join("|");
     if (seen.has(key)) continue;
     seen.add(key);
     output.push(item);
   }
-
   return output;
 }
 
 function parseCsv(text) {
   const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/).filter(Boolean);
   if (lines.length < 2) return [];
-
   const headers = parseCsvLine(lines[0]).map(header => header.trim());
   return lines.slice(1).map(line => {
     const values = parseCsvLine(line);
     const row = {};
-    headers.forEach((header, index) => {
-      row[header] = values[index] ?? "";
-    });
+    headers.forEach((header, index) => { row[header] = values[index] ?? ""; });
     return row;
   });
 }
@@ -218,7 +216,6 @@ function parseCsvLine(line) {
   const values = [];
   let current = "";
   let quoted = false;
-
   for (let i = 0; i < line.length; i += 1) {
     const char = line[i];
     if (char === '"') {
@@ -235,7 +232,6 @@ function parseCsvLine(line) {
       current += char;
     }
   }
-
   values.push(current);
   return values;
 }
@@ -257,11 +253,7 @@ function corsHeaders() {
 function withCors(response) {
   const headers = new Headers(response.headers);
   Object.entries(corsHeaders()).forEach(([key, value]) => headers.set(key, value));
-  return new Response(response.body, {
-    status: response.status,
-    statusText: response.statusText,
-    headers
-  });
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
 function json(data, status = 200) {
