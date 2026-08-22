@@ -2,8 +2,9 @@
   "use strict";
 
   const CONFIG = window.PANTAU_CONFIG || {};
-  const API_URL = String(CONFIG.apiUrl || "").replace(/\/$/, "");
+  const API_URL = String(CONFIG.apiUrl || window.location.origin).replace(/\/$/, "");
   const REFRESH_MS = 15 * 60 * 1000;
+  const LOOKBACK_HOURS = 24;
   const INDONESIA_BOUNDS = [[-11.3, 94.5], [6.7, 141.5]];
   const PROVINCE_GEOJSON_URL = "https://raw.githubusercontent.com/AlfianAliM/Indonesia-GeoJSON/master/provinsi.geojson";
 
@@ -13,39 +14,20 @@
     provinces: null,
     provinceLayer: null,
     markerLayer: null,
-    sourceMode: "demo",
-    selectedId: null
+    status: "loading",
+    generatedAt: null
   };
 
-  const els = {
-    modeBadge: document.getElementById("modeBadge"),
-    updatedAt: document.getElementById("updatedAt"),
-    statTotal: document.getElementById("statTotal"),
-    statRecent: document.getElementById("statRecent"),
-    statHigh: document.getElementById("statHigh"),
-    visibleCount: document.getElementById("visibleCount"),
-    provinceFilter: document.getElementById("provinceFilter"),
-    ageFilter: document.getElementById("ageFilter"),
-    confidenceFilter: document.getElementById("confidenceFilter"),
-    sensorFilter: document.getElementById("sensorFilter"),
-    resetFilters: document.getElementById("resetFilters"),
-    fitIndonesia: document.getElementById("fitIndonesia"),
-    mapContext: document.getElementById("mapContext"),
-    loadingState: document.getElementById("loadingState"),
-    emptyDetail: document.getElementById("emptyDetail"),
-    detailContent: document.getElementById("detailContent"),
-    detailStatus: document.getElementById("detailStatus"),
-    detailAgeBadge: document.getElementById("detailAgeBadge"),
-    detailTime: document.getElementById("detailTime"),
-    detailProvince: document.getElementById("detailProvince"),
-    detailSatellite: document.getElementById("detailSatellite"),
-    detailConfidence: document.getElementById("detailConfidence"),
-    detailFrp: document.getElementById("detailFrp"),
-    detailCoords: document.getElementById("detailCoords")
-  };
+  const els = Object.fromEntries([
+    "modeBadge", "updatedAt", "statTotal", "statRecent", "statHigh", "visibleCount",
+    "provinceFilter", "ageFilter", "confidenceFilter", "sensorFilter", "resetFilters",
+    "fitIndonesia", "mapContext", "loadingState", "emptyDetail", "detailContent",
+    "detailStatus", "detailAgeBadge", "detailTime", "detailProvince", "detailSatellite",
+    "detailConfidence", "detailFrp", "detailCoords", "sourceSummary"
+  ].map(id => [id, document.getElementById(id)]));
 
   if (!window.L) {
-    els.loadingState.textContent = "Pustaka peta gagal dimuat. Muat ulang halaman.";
+    els.loadingState.textContent = "Peta gagal dimuat. Muat ulang halaman.";
     return;
   }
 
@@ -55,7 +37,6 @@
     maxZoom: 15,
     preferCanvas: true
   });
-
   map.fitBounds(INDONESIA_BOUNDS, { padding: [12, 12] });
 
   L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
@@ -63,7 +44,7 @@
     attribution: "&copy; OpenStreetMap contributors"
   }).addTo(map);
 
-  const canvasRenderer = L.canvas({ padding: 0.5 });
+  const canvasRenderer = L.canvas({ padding: 0.6, tolerance: 4 });
   state.markerLayer = L.layerGroup().addTo(map);
 
   function setLoading(message, hide = false) {
@@ -71,10 +52,10 @@
     els.loadingState.classList.toggle("hidden", hide);
   }
 
-  function setMode(mode, message) {
-    state.sourceMode = mode;
-    els.modeBadge.className = mode === "live" ? "badge badge-live" : "badge badge-demo";
-    els.modeBadge.textContent = mode === "live" ? "LIVE NASA FIRMS" : message || "MODE DEMO";
+  function setStatus(status, message) {
+    state.status = status;
+    els.modeBadge.className = `badge ${status === "live" ? "badge-live" : status === "error" ? "badge-error" : "badge-neutral"}`;
+    els.modeBadge.textContent = message || (status === "live" ? "NASA FIRMS NRT" : status === "error" ? "DATA TIDAK TERSEDIA" : "MEMUAT DATA");
   }
 
   function formatNumber(value) {
@@ -96,9 +77,9 @@
   }
 
   function hoursAgo(dateValue) {
-    const diff = Date.now() - new Date(dateValue).getTime();
-    if (!Number.isFinite(diff)) return 999;
-    return Math.max(0, diff / 3600000);
+    const t = new Date(dateValue).getTime();
+    if (!Number.isFinite(t)) return 999;
+    return Math.max(0, (Date.now() - t) / 3600000);
   }
 
   function ageLabel(hours) {
@@ -108,9 +89,9 @@
   }
 
   function markerColor(hours) {
-    if (hours < 6) return "#ff5b4d";
-    if (hours < 12) return "#ff9a3d";
-    return "#f7cf58";
+    if (hours < 6) return "#d73027";
+    if (hours < 12) return "#ef8a2f";
+    return "#e6b422";
   }
 
   function normalizeConfidence(value) {
@@ -131,16 +112,15 @@
     const latitude = Number(item.latitude);
     const longitude = Number(item.longitude);
     if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
-
-    const acquiredAt = item.acquiredAt || item.acquired_at || item.datetime || new Date().toISOString();
-    const satellite = String(item.satellite || item.sensor || "Unknown");
+    const acquiredAt = item.acquiredAt || item.acquired_at || item.datetime;
+    if (!acquiredAt || Number.isNaN(new Date(acquiredAt).getTime())) return null;
     return {
-      id: String(item.id || `${latitude.toFixed(4)}-${longitude.toFixed(4)}-${acquiredAt}-${index}`),
+      id: String(item.id || `${latitude}-${longitude}-${acquiredAt}-${index}`),
       latitude,
       longitude,
       acquiredAt,
-      satellite,
-      instrument: String(item.instrument || "VIIRS"),
+      satellite: String(item.satellite || "Unknown"),
+      instrument: String(item.instrument || "Unknown"),
       confidence: normalizeConfidence(item.confidence),
       frp: Number(item.frp),
       province: item.province || null,
@@ -148,68 +128,28 @@
     };
   }
 
-  function makeDemoData() {
-    const now = Date.now();
-    const samples = [
-      [-0.42, 109.31, 1.2, "NOAA-21", "high", 31.4],
-      [-1.68, 110.23, 2.4, "NOAA-20", "nominal", 18.6],
-      [-2.21, 111.72, 4.8, "Suomi-NPP", "high", 43.1],
-      [-2.98, 114.41, 7.1, "NOAA-21", "nominal", 16.2],
-      [-3.18, 115.21, 10.4, "NOAA-20", "high", 27.9],
-      [0.48, 116.72, 3.5, "Suomi-NPP", "nominal", 12.3],
-      [-0.72, 117.18, 13.6, "NOAA-21", "low", 7.2],
-      [0.76, 101.48, 5.1, "NOAA-20", "high", 38.6],
-      [-2.95, 104.71, 8.8, "Suomi-NPP", "nominal", 21.7],
-      [-1.61, 103.61, 17.2, "NOAA-21", "high", 34.9],
-      [-3.44, 137.21, 6.6, "NOAA-20", "nominal", 19.1],
-      [-8.31, 118.62, 20.1, "Suomi-NPP", "low", 5.8]
-    ];
-
-    return samples.map((row, index) => ({
-      id: `demo-${index + 1}`,
-      latitude: row[0],
-      longitude: row[1],
-      acquiredAt: new Date(now - row[2] * 3600000).toISOString(),
-      satellite: row[3],
-      instrument: "VIIRS",
-      confidence: row[4],
-      frp: row[5],
-      source: "Demo data"
-    }));
-  }
-
   async function loadProvinces() {
     try {
       const response = await fetch(PROVINCE_GEOJSON_URL, { cache: "force-cache" });
-      if (!response.ok) throw new Error(`Province GeoJSON HTTP ${response.status}`);
-      const data = await response.json();
-      state.provinces = data;
-
-      state.provinceLayer = L.geoJSON(data, {
-        style: {
-          color: "rgba(210,220,230,.35)",
-          weight: 1,
-          fillColor: "#0f1720",
-          fillOpacity: 0.05
-        }
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      state.provinces = await response.json();
+      state.provinceLayer = L.geoJSON(state.provinces, {
+        interactive: false,
+        style: { color: "rgba(50,65,80,.32)", weight: 1, fillOpacity: 0 }
       }).addTo(map);
     } catch (error) {
-      console.warn("Province boundaries unavailable:", error);
-      state.provinces = null;
+      console.warn("Batas provinsi tidak tersedia:", error);
     }
   }
 
   function provinceName(feature) {
     const props = feature?.properties || {};
-    return String(
-      props.name || props.NAME_1 || props.PROVINSI || props.Provinsi || props.Propinsi || props.province || "Tidak diketahui"
-    ).trim();
+    return String(props.name || props.NAME_1 || props.PROVINSI || props.Provinsi || props.Propinsi || props.province || "Tidak diketahui").trim();
   }
 
   function classifyProvinces() {
     if (!state.provinces || !window.turf) return;
     const features = state.provinces.features || [];
-
     for (const detection of state.detections) {
       if (detection.province) continue;
       const point = turf.point([detection.longitude, detection.latitude]);
@@ -219,50 +159,62 @@
             detection.province = provinceName(feature);
             break;
           }
-        } catch (_) {
-          // Skip malformed polygon and continue.
-        }
+        } catch (_) {}
       }
       detection.province ||= "Tidak diketahui";
     }
   }
 
-  function populateProvinceFilter() {
-    const current = els.provinceFilter.value;
-    const names = [...new Set(state.detections.map(item => item.province).filter(Boolean))]
-      .filter(name => name !== "Tidak diketahui")
-      .sort((a, b) => a.localeCompare(b, "id"));
-
+  function populateFilters() {
+    const currentProvince = els.provinceFilter.value;
+    const provinces = [...new Set(state.detections.map(d => d.province).filter(v => v && v !== "Tidak diketahui"))].sort((a,b) => a.localeCompare(b, "id"));
     els.provinceFilter.innerHTML = '<option value="all">Semua provinsi</option>';
-    for (const name of names) {
+    provinces.forEach(name => {
       const option = document.createElement("option");
       option.value = name;
       option.textContent = name;
       els.provinceFilter.appendChild(option);
-    }
-    els.provinceFilter.value = names.includes(current) ? current : "all";
+    });
+    els.provinceFilter.value = provinces.includes(currentProvince) ? currentProvince : "all";
+
+    const currentSensor = els.sensorFilter.value;
+    const sensors = [...new Set(state.detections.map(d => d.satellite).filter(Boolean))].sort();
+    els.sensorFilter.innerHTML = '<option value="all">Semua satelit</option>';
+    sensors.forEach(name => {
+      const option = document.createElement("option");
+      option.value = name;
+      option.textContent = name;
+      els.sensorFilter.appendChild(option);
+    });
+    els.sensorFilter.value = sensors.includes(currentSensor) ? currentSensor : "all";
   }
 
   async function loadData() {
-    setLoading(API_URL ? "Mengambil data NASA FIRMS…" : "Menampilkan data demo sampai backend dihubungkan…");
-
-    if (!API_URL) {
-      state.detections = makeDemoData();
-      setMode("demo", "MODE DEMO");
-      return;
-    }
+    setStatus("loading");
+    setLoading("Mengambil deteksi 24 jam terakhir dari NASA FIRMS…");
 
     try {
-      const response = await fetch(`${API_URL}/api/hotspots?days=1`, { headers: { Accept: "application/json" } });
-      if (!response.ok) throw new Error(`API HTTP ${response.status}`);
-      const payload = await response.json();
+      const response = await fetch(`${API_URL}/api/hotspots?hours=${LOOKBACK_HOURS}`, {
+        headers: { Accept: "application/json" },
+        cache: "no-store"
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.message || payload.error || `API HTTP ${response.status}`);
+
       const rows = Array.isArray(payload.detections) ? payload.detections : [];
       state.detections = rows.map(normalizeDetection).filter(Boolean);
-      setMode("live");
+      state.generatedAt = payload.generatedAt || new Date().toISOString();
+      setStatus("live", "NASA FIRMS NRT");
+      if (els.sourceSummary) {
+        const src = Array.isArray(payload.sources) ? payload.sources.join(" · ") : "VIIRS + MODIS";
+        els.sourceSummary.textContent = `${src} · rolling ${LOOKBACK_HOURS} jam`;
+      }
     } catch (error) {
-      console.error("Live API unavailable, using demo data:", error);
-      state.detections = makeDemoData();
-      setMode("demo", "DEMO · API OFFLINE");
+      console.error("NASA FIRMS API gagal:", error);
+      state.detections = [];
+      state.generatedAt = null;
+      setStatus("error", "DATA TIDAK TERSEDIA");
+      setLoading(`Data live gagal dimuat: ${error.message}. Tidak ada data contoh yang ditampilkan.`);
     }
   }
 
@@ -274,14 +226,14 @@
 
     state.filtered = state.detections.filter(item => {
       const h = hoursAgo(item.acquiredAt);
-      const matchesProvince = province === "all" || item.province === province;
-      const matchesConfidence = confidence === "all" || item.confidence === confidence;
-      const matchesSensor = sensor === "all" || item.satellite === sensor;
-      let matchesAge = true;
-      if (age === "0-6") matchesAge = h < 6;
-      if (age === "6-12") matchesAge = h >= 6 && h < 12;
-      if (age === "12-24") matchesAge = h >= 12 && h <= 24;
-      return matchesProvince && matchesConfidence && matchesSensor && matchesAge;
+      if (h > LOOKBACK_HOURS) return false;
+      if (province !== "all" && item.province !== province) return false;
+      if (confidence !== "all" && item.confidence !== confidence) return false;
+      if (sensor !== "all" && item.satellite !== sensor) return false;
+      if (age === "0-6" && !(h < 6)) return false;
+      if (age === "6-12" && !(h >= 6 && h < 12)) return false;
+      if (age === "12-24" && !(h >= 12 && h <= 24)) return false;
+      return true;
     });
   }
 
@@ -292,28 +244,26 @@
     els.statRecent.textContent = formatNumber(recent);
     els.statHigh.textContent = formatNumber(high);
     els.visibleCount.textContent = `${formatNumber(state.filtered.length)} deteksi`;
-    els.updatedAt.textContent = formatTime(new Date());
+    els.updatedAt.textContent = state.generatedAt ? formatTime(state.generatedAt) : "—";
   }
 
   function renderMarkers() {
     state.markerLayer.clearLayers();
-
     for (const item of state.filtered) {
       const ageHours = hoursAgo(item.acquiredAt);
       const color = markerColor(ageHours);
       const marker = L.circleMarker([item.latitude, item.longitude], {
         renderer: canvasRenderer,
-        radius: ageHours < 6 ? 6 : 5,
-        weight: 1,
+        radius: ageHours < 6 ? 4.2 : 3.6,
+        weight: 0.7,
         color,
         fillColor: color,
-        fillOpacity: ageHours < 6 ? 0.82 : 0.67,
-        opacity: 0.95
+        fillOpacity: 0.84,
+        opacity: 0.92
       });
-
       marker.bindTooltip(
-        `<div class="map-popup"><strong>${escapeHtml(item.province || "Lokasi belum diklasifikasi")}</strong><span>${escapeHtml(ageLabel(ageHours))} · ${escapeHtml(item.satellite)}</span></div>`,
-        { direction: "top", offset: [0, -5], opacity: 0.96 }
+        `<div class="map-popup"><strong>${escapeHtml(item.province || "Lokasi belum diklasifikasi")}</strong><span>${escapeHtml(ageLabel(ageHours))} · ${escapeHtml(item.satellite)} / ${escapeHtml(item.instrument)}</span></div>`,
+        { direction: "top", offset: [0, -4], opacity: 0.96 }
       );
       marker.on("click", () => showDetail(item));
       marker.addTo(state.markerLayer);
@@ -321,26 +271,16 @@
   }
 
   function renderContext() {
-    const parts = [];
-    if (els.provinceFilter.value !== "all") parts.push(els.provinceFilter.value);
-    else parts.push("Indonesia");
-
-    const ageLabels = {
-      all: "24 jam terakhir",
-      "0-6": "<6 jam",
-      "6-12": "6–12 jam",
-      "12-24": "12–24 jam"
-    };
-    parts.push(ageLabels[els.ageFilter.value]);
-    els.mapContext.textContent = parts.join(" · ");
+    const place = els.provinceFilter.value === "all" ? "Indonesia" : els.provinceFilter.value;
+    const ageLabels = { all: "24 jam terakhir", "0-6": "<6 jam", "6-12": "6–12 jam", "12-24": "12–24 jam" };
+    els.mapContext.textContent = `${place} · ${ageLabels[els.ageFilter.value]}`;
   }
 
   function showDetail(item) {
-    state.selectedId = item.id;
     const h = hoursAgo(item.acquiredAt);
     els.emptyDetail.classList.add("hidden");
     els.detailContent.classList.remove("hidden");
-    els.detailStatus.textContent = h < 6 ? "Terdeteksi aktif" : "Masih dipantau";
+    els.detailStatus.textContent = h < 6 ? "Deteksi terbaru" : "Deteksi hotspot";
     els.detailAgeBadge.textContent = ageLabel(h);
     els.detailTime.textContent = formatTime(item.acquiredAt);
     els.detailProvince.textContent = item.province || "Tidak diketahui";
@@ -355,7 +295,7 @@
     renderStats();
     renderMarkers();
     renderContext();
-    setLoading("", true);
+    if (state.status === "live") setLoading("", true);
   }
 
   function escapeHtml(value) {
@@ -368,10 +308,7 @@
   }
 
   function bindEvents() {
-    [els.provinceFilter, els.ageFilter, els.confidenceFilter, els.sensorFilter].forEach(control => {
-      control.addEventListener("change", render);
-    });
-
+    [els.provinceFilter, els.ageFilter, els.confidenceFilter, els.sensorFilter].forEach(control => control.addEventListener("change", render));
     els.resetFilters.addEventListener("click", () => {
       els.provinceFilter.value = "all";
       els.ageFilter.value = "all";
@@ -380,17 +317,13 @@
       render();
       map.fitBounds(INDONESIA_BOUNDS, { padding: [12, 12] });
     });
-
-    els.fitIndonesia.addEventListener("click", () => {
-      map.fitBounds(INDONESIA_BOUNDS, { padding: [12, 12] });
-    });
+    els.fitIndonesia.addEventListener("click", () => map.fitBounds(INDONESIA_BOUNDS, { padding: [12, 12] }));
   }
 
   async function refreshLiveData() {
-    if (!API_URL) return;
     await loadData();
     classifyProvinces();
-    populateProvinceFilter();
+    populateFilters();
     state.detections.sort((a, b) => new Date(b.acquiredAt) - new Date(a.acquiredAt));
     render();
   }
@@ -398,19 +331,16 @@
   async function init() {
     bindEvents();
     await Promise.all([loadProvinces(), loadData()]);
-    state.detections = state.detections.map(normalizeDetection).filter(Boolean);
     classifyProvinces();
-    populateProvinceFilter();
+    populateFilters();
     state.detections.sort((a, b) => new Date(b.acquiredAt) - new Date(a.acquiredAt));
     render();
-
-    if (API_URL) {
-      window.setInterval(refreshLiveData, REFRESH_MS);
-    }
+    window.setInterval(refreshLiveData, REFRESH_MS);
   }
 
   init().catch(error => {
     console.error(error);
-    setLoading("Terjadi kesalahan saat menyiapkan dashboard. Muat ulang halaman.");
+    setStatus("error", "DATA TIDAK TERSEDIA");
+    setLoading("Dashboard gagal disiapkan. Muat ulang halaman.");
   });
 })();
