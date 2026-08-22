@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="description" content="Pantau hotspot dan active-fire detection Indonesia dari NASA FIRMS secara near real-time." />
-  <meta name="theme-color" content="#0b0f14" />
+  <meta name="description" content="Peta pemantauan hotspot Indonesia dari NASA FIRMS VIIRS dan MODIS secara near real-time." />
+  <meta name="theme-color" content="#0a0d11" />
   <title>Pantau Karhutla Indonesia</title>
   <link rel="preconnect" href="https://unpkg.com" crossorigin />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
@@ -14,16 +14,16 @@
   <div class="app-shell">
     <header class="topbar">
       <div class="brand-wrap">
-        <div class="brand-mark" aria-hidden="true">🔥</div>
+        <span class="brand-mark" aria-hidden="true"></span>
         <div>
           <p class="eyebrow">PEMANTAUAN PUBLIK</p>
           <h1>Pantau Karhutla Indonesia</h1>
         </div>
       </div>
       <div class="live-wrap">
-        <span id="modeBadge" class="badge badge-demo">MODE DEMO</span>
+        <span id="modeBadge" class="badge badge-neutral">MEMUAT DATA</span>
         <div class="updated">
-          <span>Update terakhir</span>
+          <span>Pembaruan data</span>
           <strong id="updatedAt">—</strong>
         </div>
       </div>
@@ -32,26 +32,26 @@
     <main>
       <section class="intro" aria-labelledby="introTitle">
         <div>
-          <p class="kicker">NEAR REAL-TIME SATELLITE MONITORING</p>
-          <h2 id="introTitle">Lihat di mana anomali panas terdeteksi di Indonesia.</h2>
-          <p class="intro-copy">Data utama berasal dari NASA FIRMS VIIRS. Titik pada peta adalah <strong>deteksi satelit</strong>, bukan otomatis kebakaran hutan yang sudah terverifikasi di lapangan.</p>
+          <p class="kicker">NASA FIRMS · NEAR REAL-TIME</p>
+          <h2 id="introTitle">Peta deteksi hotspot Indonesia</h2>
+          <p class="intro-copy">Menampilkan deteksi panas aktif dalam 24 jam bergulir dari VIIRS dan MODIS. Titik satelit membantu melihat lokasi yang perlu diperhatikan, tetapi tidak membuktikan penyebab kebakaran atau bahwa suatu kebakaran sengaja dilakukan.</p>
         </div>
         <div class="source-note">
-          <span class="dot"></span>
-          <span>Auto-refresh setiap 15 menit</span>
+          <span>Refresh otomatis 15 menit</span>
+          <span id="sourceSummary">VIIRS + MODIS · rolling 24 jam</span>
         </div>
       </section>
 
-      <section class="stats-grid" aria-label="Statistik deteksi">
+      <section class="stats-grid" aria-label="Ringkasan deteksi">
         <article class="stat-card">
           <span class="stat-label">Deteksi 24 jam</span>
           <strong id="statTotal" class="stat-value">0</strong>
-          <span class="stat-foot">semua sensor aktif</span>
+          <span class="stat-foot">seluruh Indonesia</span>
         </article>
         <article class="stat-card danger">
-          <span class="stat-label">Aktif &lt;6 jam</span>
+          <span class="stat-label">Deteksi &lt;6 jam</span>
           <strong id="statRecent" class="stat-value">0</strong>
-          <span class="stat-foot">deteksi paling baru</span>
+          <span class="stat-foot">paling baru</span>
         </article>
         <article class="stat-card">
           <span class="stat-label">Confidence tinggi</span>
@@ -61,7 +61,7 @@
         <article class="stat-card verified">
           <span class="stat-label">Padam terverifikasi</span>
           <strong class="stat-value muted-value">—</strong>
-          <span class="stat-foot">belum ada feed resmi</span>
+          <span class="stat-foot">menunggu sumber lapangan resmi</span>
         </article>
       </section>
 
@@ -77,9 +77,7 @@
 
           <label class="field">
             <span>Provinsi</span>
-            <select id="provinceFilter">
-              <option value="all">Semua provinsi</option>
-            </select>
+            <select id="provinceFilter"><option value="all">Semua provinsi</option></select>
           </label>
 
           <label class="field">
@@ -103,17 +101,12 @@
           </label>
 
           <label class="field">
-            <span>Sensor</span>
-            <select id="sensorFilter">
-              <option value="all">Semua sensor</option>
-              <option value="NOAA-20">NOAA-20</option>
-              <option value="NOAA-21">NOAA-21</option>
-              <option value="Suomi-NPP">Suomi-NPP</option>
-            </select>
+            <span>Satelit</span>
+            <select id="sensorFilter"><option value="all">Semua satelit</option></select>
           </label>
 
           <div class="legend" aria-label="Legenda umur deteksi">
-            <p>Legenda</p>
+            <p>Umur deteksi</p>
             <div><span class="legend-dot red"></span><span>&lt;6 jam</span></div>
             <div><span class="legend-dot orange"></span><span>6–12 jam</span></div>
             <div><span class="legend-dot yellow"></span><span>12–24 jam</span></div>
@@ -127,27 +120,25 @@
 
         <div class="map-column">
           <div class="map-toolbar">
-            <div>
-              <span id="mapContext">Indonesia · 24 jam terakhir</span>
-            </div>
-            <button id="fitIndonesia" type="button" class="secondary-button">Lihat Indonesia</button>
+            <span id="mapContext">Indonesia · 24 jam terakhir</span>
+            <button id="fitIndonesia" type="button" class="secondary-button">Seluruh Indonesia</button>
           </div>
-          <div id="map" role="application" aria-label="Peta deteksi hotspot Indonesia"></div>
-          <div id="loadingState" class="map-status" aria-live="polite">Menyiapkan peta…</div>
+          <div id="map" role="application" aria-label="Peta hotspot Indonesia"></div>
+          <div id="loadingState" class="map-status" aria-live="polite">Mengambil data NASA FIRMS…</div>
         </div>
 
         <aside class="panel detail-panel" aria-label="Detail deteksi">
           <div id="emptyDetail" class="empty-detail">
-            <div class="empty-icon">⌖</div>
+            <span class="target-mark" aria-hidden="true"></span>
             <h3>Pilih titik pada peta</h3>
-            <p>Detail deteksi satelit akan muncul di sini.</p>
+            <p>Informasi sensor, waktu, confidence, FRP, dan koordinat akan muncul di sini.</p>
           </div>
 
           <div id="detailContent" class="detail-content hidden">
             <div class="panel-heading detail-heading">
               <div>
                 <p class="eyebrow">DETAIL DETEKSI</p>
-                <h3 id="detailStatus">Aktif</h3>
+                <h3 id="detailStatus">Deteksi hotspot</h3>
               </div>
               <span id="detailAgeBadge" class="age-badge">—</span>
             </div>
@@ -155,15 +146,15 @@
             <dl class="detail-list">
               <div><dt>Waktu deteksi</dt><dd id="detailTime">—</dd></div>
               <div><dt>Provinsi</dt><dd id="detailProvince">—</dd></div>
-              <div><dt>Satelit</dt><dd id="detailSatellite">—</dd></div>
+              <div><dt>Satelit / sensor</dt><dd id="detailSatellite">—</dd></div>
               <div><dt>Confidence</dt><dd id="detailConfidence">—</dd></div>
               <div><dt>FRP</dt><dd id="detailFrp">—</dd></div>
               <div><dt>Koordinat</dt><dd id="detailCoords">—</dd></div>
             </dl>
 
             <div class="warning-box">
-              <strong>Bukan konfirmasi kebakaran.</strong>
-              <p>Deteksi termal dapat berasal dari berbagai sumber panas dan perlu verifikasi lapangan.</p>
+              <strong>Deteksi hotspot bukan konfirmasi penyebab kebakaran.</strong>
+              <p>Verifikasi lapangan tetap diperlukan untuk memastikan kondisi sebenarnya dan penyebab kejadian.</p>
             </div>
           </div>
         </aside>
@@ -171,26 +162,26 @@
 
       <section class="info-grid">
         <article>
-          <p class="eyebrow">BAGAIMANA MEMBACANYA</p>
-          <h3>Hotspot bukan vonis kebakaran.</h3>
-          <p>Website ini menampilkan anomali termal yang dideteksi satelit. Data membantu melihat pola dan lokasi yang perlu diperhatikan, tetapi tidak digunakan untuk menuduh individu, perusahaan, atau wilayah tertentu sebagai penyebab kebakaran.</p>
+          <p class="eyebrow">METODOLOGI</p>
+          <h3>Hotspot adalah anomali termal satelit.</h3>
+          <p>VIIRS memberi deteksi beresolusi sekitar 375 meter dan MODIS sekitar 1 kilometer. Satu kejadian dapat menghasilkan lebih dari satu titik dari waktu atau sensor berbeda.</p>
         </article>
         <article>
           <p class="eyebrow">STATUS PADAM</p>
-          <h3>Tidak ditebak dari hilangnya titik.</h3>
-          <p>Deteksi yang tidak muncul lagi tidak otomatis berarti api telah padam. Label “padam terverifikasi” baru akan digunakan jika tersedia laporan lapangan dari sumber resmi yang dapat diintegrasikan.</p>
+          <h3>Tidak ditentukan dari hilangnya hotspot.</h3>
+          <p>Status padam hanya akan ditampilkan jika tersedia verifikasi lapangan dari sumber resmi. Hilangnya deteksi satelit saja tidak cukup.</p>
         </article>
         <article>
-          <p class="eyebrow">SUMBER</p>
-          <h3>NASA FIRMS + OpenStreetMap.</h3>
-          <p>Feed active-fire menggunakan VIIRS NRT melalui NASA FIRMS. Basemap menggunakan OpenStreetMap. Batas provinsi hanya membantu filter visual.</p>
+          <p class="eyebrow">SUMBER DATA</p>
+          <h3>NASA FIRMS dan OpenStreetMap.</h3>
+          <p>Feed near real-time menggabungkan VIIRS NOAA-20, NOAA-21, Suomi-NPP, serta MODIS Terra/Aqua. Peta dasar menggunakan OpenStreetMap.</p>
         </article>
       </section>
     </main>
 
     <footer>
       <p>Pantau Karhutla Indonesia · Proyek informasi publik independen.</p>
-      <p>Data satelit bersifat near real-time dan dapat memiliki jeda, false positive, atau keterbatasan observasi.</p>
+      <p>Data satelit dapat memiliki jeda observasi, false positive, dan keterbatasan tutupan awan.</p>
     </footer>
   </div>
 
