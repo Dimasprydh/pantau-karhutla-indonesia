@@ -10,33 +10,32 @@
 
   const state = {
     detections: [],
-    filtered: [],
+    events: [],
+    filteredDetections: [],
+    filteredEvents: [],
     provinces: null,
     provinceLayer: null,
-    markerLayer: null,
+    rawLayer: null,
+    eventLayer: null,
     status: "loading",
     generatedAt: null
   };
 
-  const els = Object.fromEntries([
-    "modeBadge", "updatedAt", "statTotal", "statRecent", "statHigh", "visibleCount",
-    "provinceFilter", "ageFilter", "confidenceFilter", "sensorFilter", "resetFilters",
-    "fitIndonesia", "mapContext", "loadingState", "emptyDetail", "detailContent",
-    "detailStatus", "detailAgeBadge", "detailTime", "detailProvince", "detailSatellite",
-    "detailConfidence", "detailFrp", "detailCoords", "sourceSummary"
-  ].map(id => [id, document.getElementById(id)]));
+  const ids = [
+    "modeBadge", "updatedAt", "statDetections", "statEvents", "statLikely", "statVerified",
+    "visibleCount", "provinceFilter", "statusFilter", "ageFilter", "sensorFilter", "resetFilters",
+    "fitIndonesia", "mapContext", "loadingState", "emptyDetail", "detailContent", "detailStatus",
+    "detailAgeBadge", "detailFirstSeen", "detailLastSeen", "detailProvince", "detailSensors",
+    "detailDetections", "detailFrp", "detailCoords", "detailScore", "detailVerification", "sourceSummary"
+  ];
+  const els = Object.fromEntries(ids.map(id => [id, document.getElementById(id)]));
 
   if (!window.L) {
     els.loadingState.textContent = "Peta gagal dimuat. Muat ulang halaman.";
     return;
   }
 
-  const map = L.map("map", {
-    zoomControl: true,
-    minZoom: 3,
-    maxZoom: 15,
-    preferCanvas: true
-  });
+  const map = L.map("map", { zoomControl: true, minZoom: 3, maxZoom: 15, preferCanvas: true });
   map.fitBounds(INDONESIA_BOUNDS, { padding: [12, 12] });
 
   L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
@@ -45,7 +44,8 @@
   }).addTo(map);
 
   const canvasRenderer = L.canvas({ padding: 0.6, tolerance: 4 });
-  state.markerLayer = L.layerGroup().addTo(map);
+  state.rawLayer = L.layerGroup().addTo(map);
+  state.eventLayer = L.layerGroup().addTo(map);
 
   function setLoading(message, hide = false) {
     els.loadingState.textContent = message;
@@ -62,24 +62,18 @@
     return new Intl.NumberFormat("id-ID").format(Number(value) || 0);
   }
 
-  function formatTime(dateValue) {
-    const date = new Date(dateValue);
+  function formatTime(value) {
+    const date = new Date(value);
     if (Number.isNaN(date.getTime())) return "—";
     return new Intl.DateTimeFormat("id-ID", {
-      timeZone: "Asia/Jakarta",
-      day: "2-digit",
-      month: "short",
-      year: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-      hour12: false
+      timeZone: "Asia/Jakarta", day: "2-digit", month: "short", year: "numeric",
+      hour: "2-digit", minute: "2-digit", hour12: false
     }).format(date) + " WIB";
   }
 
-  function hoursAgo(dateValue) {
-    const t = new Date(dateValue).getTime();
-    if (!Number.isFinite(t)) return 999;
-    return Math.max(0, (Date.now() - t) / 3600000);
+  function hoursAgo(value) {
+    const t = new Date(value).getTime();
+    return Number.isFinite(t) ? Math.max(0, (Date.now() - t) / 3600000) : 999;
   }
 
   function ageLabel(hours) {
@@ -88,43 +82,50 @@
     return `${Math.round(hours / 24)} hari lalu`;
   }
 
-  function markerColor(hours) {
-    if (hours < 6) return "#d73027";
-    if (hours < 12) return "#ef8a2f";
-    return "#e6b422";
+  function eventColor(event) {
+    if (event.verification === "verified") return "#2d9b67";
+    if (event.classification === "very_likely_fire") return "#c9362b";
+    if (event.classification === "strong_fire_indication") return "#e47f2a";
+    return "#d3aa24";
   }
 
-  function normalizeConfidence(value) {
-    const raw = String(value ?? "").trim().toLowerCase();
-    if (["h", "high"].includes(raw)) return "high";
-    if (["n", "nominal", "medium"].includes(raw)) return "nominal";
-    if (["l", "low"].includes(raw)) return "low";
-    const numeric = Number(raw);
-    if (Number.isFinite(numeric)) {
-      if (numeric >= 80) return "high";
-      if (numeric >= 30) return "nominal";
-      return "low";
-    }
-    return "nominal";
+  function eventStatusLabel(event) {
+    if (event.verification === "verified") return "Kebakaran terverifikasi";
+    return event.label || "Anomali panas";
   }
 
   function normalizeDetection(item, index) {
     const latitude = Number(item.latitude);
     const longitude = Number(item.longitude);
     if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
-    const acquiredAt = item.acquiredAt || item.acquired_at || item.datetime;
-    if (!acquiredAt || Number.isNaN(new Date(acquiredAt).getTime())) return null;
+    if (!item.acquiredAt || Number.isNaN(new Date(item.acquiredAt).getTime())) return null;
     return {
-      id: String(item.id || `${latitude}-${longitude}-${acquiredAt}-${index}`),
-      latitude,
-      longitude,
-      acquiredAt,
-      satellite: String(item.satellite || "Unknown"),
-      instrument: String(item.instrument || "Unknown"),
-      confidence: normalizeConfidence(item.confidence),
-      frp: Number(item.frp),
-      province: item.province || null,
-      source: item.source || "NASA FIRMS"
+      id: String(item.id || `d-${index}`), latitude, longitude, acquiredAt: item.acquiredAt,
+      satellite: String(item.satellite || "Unknown"), instrument: String(item.instrument || "Unknown"),
+      confidence: String(item.confidence || "nominal"), frp: Number(item.frp), province: item.province || null
+    };
+  }
+
+  function normalizeEvent(item, index) {
+    const latitude = Number(item.latitude);
+    const longitude = Number(item.longitude);
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
+    return {
+      id: String(item.id || `e-${index}`), latitude, longitude,
+      firstSeen: item.firstSeen, lastSeen: item.lastSeen,
+      durationHours: Number(item.durationHours) || 0,
+      detectionCount: Number(item.detectionCount) || 0,
+      sensors: Array.isArray(item.sensors) ? item.sensors : [],
+      instruments: Array.isArray(item.instruments) ? item.instruments : [],
+      highConfidenceCount: Number(item.highConfidenceCount) || 0,
+      maxFrp: Number.isFinite(Number(item.maxFrp)) ? Number(item.maxFrp) : null,
+      meanFrp: Number.isFinite(Number(item.meanFrp)) ? Number(item.meanFrp) : null,
+      score: Number(item.score) || 0,
+      classification: String(item.classification || "thermal_anomaly"),
+      label: String(item.label || "Anomali panas"),
+      verification: String(item.verification || "unverified"),
+      verifiedBy: item.verifiedBy || null,
+      province: item.province || null
     };
   }
 
@@ -135,7 +136,7 @@
       state.provinces = await response.json();
       state.provinceLayer = L.geoJSON(state.provinces, {
         interactive: false,
-        style: { color: "rgba(50,65,80,.32)", weight: 1, fillOpacity: 0 }
+        style: { color: "rgba(45,58,70,.30)", weight: 1, fillOpacity: 0 }
       }).addTo(map);
     } catch (error) {
       console.warn("Batas provinsi tidak tersedia:", error);
@@ -143,39 +144,37 @@
   }
 
   function provinceName(feature) {
-    const props = feature?.properties || {};
-    return String(props.name || props.NAME_1 || props.PROVINSI || props.Provinsi || props.Propinsi || props.province || "Tidak diketahui").trim();
+    const p = feature?.properties || {};
+    return String(p.name || p.NAME_1 || p.PROVINSI || p.Provinsi || p.Propinsi || p.province || "Tidak diketahui").trim();
   }
 
-  function classifyProvinces() {
-    if (!state.provinces || !window.turf) return;
-    const features = state.provinces.features || [];
-    for (const detection of state.detections) {
-      if (detection.province) continue;
-      const point = turf.point([detection.longitude, detection.latitude]);
-      for (const feature of features) {
-        try {
-          if (turf.booleanPointInPolygon(point, feature)) {
-            detection.province = provinceName(feature);
-            break;
-          }
-        } catch (_) {}
-      }
-      detection.province ||= "Tidak diketahui";
+  function locateProvince(latitude, longitude) {
+    if (!state.provinces || !window.turf) return "Tidak diketahui";
+    const point = turf.point([longitude, latitude]);
+    for (const feature of state.provinces.features || []) {
+      try {
+        if (turf.booleanPointInPolygon(point, feature)) return provinceName(feature);
+      } catch (_) {}
     }
+    return "Tidak diketahui";
+  }
+
+  function classifyLocations() {
+    state.detections.forEach(d => { if (!d.province) d.province = locateProvince(d.latitude, d.longitude); });
+    state.events.forEach(e => { if (!e.province) e.province = locateProvince(e.latitude, e.longitude); });
   }
 
   function populateFilters() {
     const currentProvince = els.provinceFilter.value;
-    const provinces = [...new Set(state.detections.map(d => d.province).filter(v => v && v !== "Tidak diketahui"))].sort((a,b) => a.localeCompare(b, "id"));
+    const names = [...new Set(state.events.map(e => e.province).filter(v => v && v !== "Tidak diketahui"))].sort((a, b) => a.localeCompare(b, "id"));
     els.provinceFilter.innerHTML = '<option value="all">Semua provinsi</option>';
-    provinces.forEach(name => {
+    names.forEach(name => {
       const option = document.createElement("option");
       option.value = name;
       option.textContent = name;
       els.provinceFilter.appendChild(option);
     });
-    els.provinceFilter.value = provinces.includes(currentProvince) ? currentProvince : "all";
+    els.provinceFilter.value = names.includes(currentProvince) ? currentProvince : "all";
 
     const currentSensor = els.sensorFilter.value;
     const sensors = [...new Set(state.detections.map(d => d.satellite).filter(Boolean))].sort();
@@ -191,128 +190,146 @@
 
   async function loadData() {
     setStatus("loading");
-    setLoading("Mengambil deteksi 24 jam terakhir dari NASA FIRMS…");
-
+    setLoading("Mengambil data satelit dan menyusun kejadian kebakaran…");
     try {
-      const response = await fetch(`${API_URL}/api/hotspots?hours=${LOOKBACK_HOURS}`, {
-        headers: { Accept: "application/json" },
-        cache: "no-store"
-      });
+      const response = await fetch(`${API_URL}/api/hotspots?hours=${LOOKBACK_HOURS}`, { headers: { Accept: "application/json" }, cache: "no-store" });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.message || payload.error || `API HTTP ${response.status}`);
 
-      const rows = Array.isArray(payload.detections) ? payload.detections : [];
-      state.detections = rows.map(normalizeDetection).filter(Boolean);
+      state.detections = (Array.isArray(payload.detections) ? payload.detections : []).map(normalizeDetection).filter(Boolean);
+      state.events = (Array.isArray(payload.events) ? payload.events : []).map(normalizeEvent).filter(Boolean);
       state.generatedAt = payload.generatedAt || new Date().toISOString();
       setStatus("live", "NASA FIRMS NRT");
-      if (els.sourceSummary) {
-        const src = Array.isArray(payload.sources) ? payload.sources.join(" · ") : "VIIRS + MODIS";
-        els.sourceSummary.textContent = `${src} · rolling ${LOOKBACK_HOURS} jam`;
-      }
+      if (els.sourceSummary) els.sourceSummary.textContent = `${state.detections.length} deteksi · ${state.events.length} kejadian · rolling ${LOOKBACK_HOURS} jam`;
     } catch (error) {
-      console.error("NASA FIRMS API gagal:", error);
+      console.error("API live gagal:", error);
       state.detections = [];
+      state.events = [];
       state.generatedAt = null;
       setStatus("error", "DATA TIDAK TERSEDIA");
-      setLoading(`Data live gagal dimuat: ${error.message}. Tidak ada data contoh yang ditampilkan.`);
+      setLoading(`Data live gagal dimuat: ${error.message}.`);
     }
+  }
+
+  function eventMatchesStatus(event, value) {
+    if (value === "all") return true;
+    if (value === "verified") return event.verification === "verified";
+    return event.classification === value;
   }
 
   function filterData() {
     const province = els.provinceFilter.value;
+    const status = els.statusFilter.value;
     const age = els.ageFilter.value;
-    const confidence = els.confidenceFilter.value;
     const sensor = els.sensorFilter.value;
 
-    state.filtered = state.detections.filter(item => {
-      const h = hoursAgo(item.acquiredAt);
-      if (h > LOOKBACK_HOURS) return false;
-      if (province !== "all" && item.province !== province) return false;
-      if (confidence !== "all" && item.confidence !== confidence) return false;
-      if (sensor !== "all" && item.satellite !== sensor) return false;
+    state.filteredEvents = state.events.filter(event => {
+      const h = hoursAgo(event.lastSeen);
+      if (province !== "all" && event.province !== province) return false;
+      if (!eventMatchesStatus(event, status)) return false;
       if (age === "0-6" && !(h < 6)) return false;
       if (age === "6-12" && !(h >= 6 && h < 12)) return false;
       if (age === "12-24" && !(h >= 12 && h <= 24)) return false;
+      if (sensor !== "all" && !event.sensors.includes(sensor)) return false;
       return true;
+    });
+
+    const visibleProvinces = new Set(state.filteredEvents.map(e => e.province));
+    state.filteredDetections = state.detections.filter(d => {
+      if (province !== "all" && d.province !== province) return false;
+      if (sensor !== "all" && d.satellite !== sensor) return false;
+      if (province === "all" && status === "all" && age === "all") return true;
+      return visibleProvinces.has(d.province);
     });
   }
 
   function renderStats() {
-    const recent = state.detections.filter(item => hoursAgo(item.acquiredAt) < 6).length;
-    const high = state.detections.filter(item => item.confidence === "high").length;
-    els.statTotal.textContent = formatNumber(state.detections.length);
-    els.statRecent.textContent = formatNumber(recent);
-    els.statHigh.textContent = formatNumber(high);
-    els.visibleCount.textContent = `${formatNumber(state.filtered.length)} deteksi`;
+    els.statDetections.textContent = formatNumber(state.detections.length);
+    els.statEvents.textContent = formatNumber(state.events.length);
+    els.statLikely.textContent = formatNumber(state.events.filter(e => e.classification === "very_likely_fire").length);
+    els.statVerified.textContent = formatNumber(state.events.filter(e => e.verification === "verified").length);
+    els.visibleCount.textContent = `${formatNumber(state.filteredEvents.length)} kejadian · ${formatNumber(state.filteredDetections.length)} deteksi`;
     els.updatedAt.textContent = state.generatedAt ? formatTime(state.generatedAt) : "—";
   }
 
-  function renderMarkers() {
-    state.markerLayer.clearLayers();
-    for (const item of state.filtered) {
-      const ageHours = hoursAgo(item.acquiredAt);
-      const color = markerColor(ageHours);
-      const marker = L.circleMarker([item.latitude, item.longitude], {
+  function renderRawDetections() {
+    state.rawLayer.clearLayers();
+    for (const d of state.filteredDetections) {
+      const h = hoursAgo(d.acquiredAt);
+      const color = h < 6 ? "#d94841" : h < 12 ? "#e89a3c" : "#d3aa24";
+      L.circleMarker([d.latitude, d.longitude], {
+        renderer: canvasRenderer, radius: 2.1, weight: 0, fillColor: color, fillOpacity: 0.55, interactive: false
+      }).addTo(state.rawLayer);
+    }
+  }
+
+  function renderEvents() {
+    state.eventLayer.clearLayers();
+    for (const event of state.filteredEvents) {
+      const color = eventColor(event);
+      const radius = Math.min(14, 6 + Math.log2(Math.max(1, event.detectionCount)) * 1.6);
+      const marker = L.circleMarker([event.latitude, event.longitude], {
         renderer: canvasRenderer,
-        radius: ageHours < 6 ? 4.2 : 3.6,
-        weight: 0.7,
+        radius,
+        weight: 2,
         color,
         fillColor: color,
-        fillOpacity: 0.84,
-        opacity: 0.92
+        fillOpacity: 0.18,
+        opacity: 0.98
       });
       marker.bindTooltip(
-        `<div class="map-popup"><strong>${escapeHtml(item.province || "Lokasi belum diklasifikasi")}</strong><span>${escapeHtml(ageLabel(ageHours))} · ${escapeHtml(item.satellite)} / ${escapeHtml(item.instrument)}</span></div>`,
-        { direction: "top", offset: [0, -4], opacity: 0.96 }
+        `<div class="map-popup"><strong>${escapeHtml(eventStatusLabel(event))}</strong><span>${escapeHtml(event.province || "Lokasi belum diklasifikasi")} · ${formatNumber(event.detectionCount)} deteksi · skor ${event.score}/100</span></div>`,
+        { direction: "top", offset: [0, -5], opacity: 0.97 }
       );
-      marker.on("click", () => showDetail(item));
-      marker.addTo(state.markerLayer);
+      marker.on("click", () => showEventDetail(event));
+      marker.addTo(state.eventLayer);
     }
+  }
+
+  function showEventDetail(event) {
+    const h = hoursAgo(event.lastSeen);
+    els.emptyDetail.classList.add("hidden");
+    els.detailContent.classList.remove("hidden");
+    els.detailStatus.textContent = eventStatusLabel(event);
+    els.detailStatus.className = `status-heading status-${event.classification}`;
+    els.detailAgeBadge.textContent = ageLabel(h);
+    els.detailFirstSeen.textContent = formatTime(event.firstSeen);
+    els.detailLastSeen.textContent = formatTime(event.lastSeen);
+    els.detailProvince.textContent = event.province || "Tidak diketahui";
+    els.detailSensors.textContent = event.sensors.length ? event.sensors.join(", ") : "—";
+    els.detailDetections.textContent = `${formatNumber(event.detectionCount)} deteksi satelit`;
+    els.detailFrp.textContent = event.maxFrp === null ? "—" : `${event.maxFrp.toFixed(1)} MW maksimum`;
+    els.detailCoords.textContent = `${event.latitude.toFixed(5)}, ${event.longitude.toFixed(5)}`;
+    els.detailScore.textContent = `${event.score}/100`;
+    els.detailVerification.textContent = event.verification === "verified"
+      ? `Terverifikasi${event.verifiedBy ? ` · ${event.verifiedBy}` : ""}`
+      : "Belum ada verifikasi lapangan resmi";
   }
 
   function renderContext() {
     const place = els.provinceFilter.value === "all" ? "Indonesia" : els.provinceFilter.value;
-    const ageLabels = { all: "24 jam terakhir", "0-6": "<6 jam", "6-12": "6–12 jam", "12-24": "12–24 jam" };
-    els.mapContext.textContent = `${place} · ${ageLabels[els.ageFilter.value]}`;
-  }
-
-  function showDetail(item) {
-    const h = hoursAgo(item.acquiredAt);
-    els.emptyDetail.classList.add("hidden");
-    els.detailContent.classList.remove("hidden");
-    els.detailStatus.textContent = h < 6 ? "Deteksi terbaru" : "Deteksi hotspot";
-    els.detailAgeBadge.textContent = ageLabel(h);
-    els.detailTime.textContent = formatTime(item.acquiredAt);
-    els.detailProvince.textContent = item.province || "Tidak diketahui";
-    els.detailSatellite.textContent = `${item.satellite} · ${item.instrument}`;
-    els.detailConfidence.textContent = item.confidence.charAt(0).toUpperCase() + item.confidence.slice(1);
-    els.detailFrp.textContent = Number.isFinite(item.frp) ? `${item.frp.toFixed(1)} MW` : "—";
-    els.detailCoords.textContent = `${item.latitude.toFixed(5)}, ${item.longitude.toFixed(5)}`;
+    els.mapContext.textContent = `${place} · ${state.filteredEvents.length} kejadian aktif · ${state.filteredDetections.length} deteksi satelit`;
   }
 
   function render() {
     filterData();
     renderStats();
-    renderMarkers();
+    renderRawDetections();
+    renderEvents();
     renderContext();
     if (state.status === "live") setLoading("", true);
   }
 
   function escapeHtml(value) {
-    return String(value)
-      .replaceAll("&", "&amp;")
-      .replaceAll("<", "&lt;")
-      .replaceAll(">", "&gt;")
-      .replaceAll('"', "&quot;")
-      .replaceAll("'", "&#039;");
+    return String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;");
   }
 
   function bindEvents() {
-    [els.provinceFilter, els.ageFilter, els.confidenceFilter, els.sensorFilter].forEach(control => control.addEventListener("change", render));
+    [els.provinceFilter, els.statusFilter, els.ageFilter, els.sensorFilter].forEach(control => control.addEventListener("change", render));
     els.resetFilters.addEventListener("click", () => {
       els.provinceFilter.value = "all";
+      els.statusFilter.value = "all";
       els.ageFilter.value = "all";
-      els.confidenceFilter.value = "all";
       els.sensorFilter.value = "all";
       render();
       map.fitBounds(INDONESIA_BOUNDS, { padding: [12, 12] });
@@ -322,18 +339,16 @@
 
   async function refreshLiveData() {
     await loadData();
-    classifyProvinces();
+    classifyLocations();
     populateFilters();
-    state.detections.sort((a, b) => new Date(b.acquiredAt) - new Date(a.acquiredAt));
     render();
   }
 
   async function init() {
     bindEvents();
     await Promise.all([loadProvinces(), loadData()]);
-    classifyProvinces();
+    classifyLocations();
     populateFilters();
-    state.detections.sort((a, b) => new Date(b.acquiredAt) - new Date(a.acquiredAt));
     render();
     window.setInterval(refreshLiveData, REFRESH_MS);
   }
