@@ -1,0 +1,9 @@
+.git/**
+.github/**
+worker/**
+README.md
+wrangler.jsonc
+wrangler.toml
+package.json
+package-lock.json
+node_modules/**
