@@ -8,6 +8,8 @@ const SOURCES = [
 const INDONESIA_BBOX = "94,-11,142,7";
 const FIRMS_BASE = "https://firms.modaps.eosdis.nasa.gov/api/area/csv";
 const CACHE_SECONDS = 600;
+const EVENT_DISTANCE_KM = 5;
+const EVENT_TIME_HOURS = 18;
 
 export default {
   async fetch(request, env, ctx) {
@@ -58,14 +60,8 @@ export default {
     const errors = [];
 
     settled.forEach((result, index) => {
-      if (result.status === "fulfilled") {
-        detections.push(...result.value);
-      } else {
-        errors.push({
-          source: SOURCES[index],
-          message: result.reason?.message || "Unknown upstream error"
-        });
-      }
+      if (result.status === "fulfilled") detections.push(...result.value);
+      else errors.push({ source: SOURCES[index], message: result.reason?.message || "Unknown upstream error" });
     });
 
     if (!detections.length && errors.length === SOURCES.length) {
@@ -85,6 +81,9 @@ export default {
       })
       .sort((a, b) => new Date(b.acquiredAt) - new Date(a.acquiredAt));
 
+    const events = buildFireEvents(filtered)
+      .sort((a, b) => new Date(b.lastSeen) - new Date(a.lastSeen));
+
     const payload = {
       ok: true,
       source: "NASA FIRMS",
@@ -94,8 +93,17 @@ export default {
       requestedDayRange: dayRange,
       bbox: INDONESIA_BBOX,
       sources: SOURCES,
-      count: filtered.length,
+      detectionCount: filtered.length,
+      eventCount: events.length,
+      likelyFireCount: events.filter(e => e.classification === "very_likely_fire").length,
+      verifiedFireCount: events.filter(e => e.verification === "verified").length,
       detections: filtered,
+      events,
+      methodology: {
+        eventDistanceKm: EVENT_DISTANCE_KM,
+        eventTimeHours: EVENT_TIME_HOURS,
+        verification: "Satellite-derived classifications are not official ground verification."
+      },
       upstreamWarnings: errors
     };
 
@@ -116,23 +124,16 @@ export default {
 async function fetchSource(mapKey, source, dayRange) {
   const endpoint = `${FIRMS_BASE}/${encodeURIComponent(mapKey)}/${source}/${INDONESIA_BBOX}/${dayRange}`;
   const response = await fetch(endpoint, { headers: { Accept: "text/csv" } });
-
-  if (!response.ok) {
-    throw new Error(`${source} returned HTTP ${response.status}`);
-  }
+  if (!response.ok) throw new Error(`${source} returned HTTP ${response.status}`);
 
   const text = await response.text();
   const trimmed = text.trim();
-  if (!trimmed || trimmed.startsWith("<")) {
-    throw new Error(`${source} returned an invalid CSV response`);
-  }
-
+  if (!trimmed || trimmed.startsWith("<")) throw new Error(`${source} returned an invalid CSV response`);
   if (/invalid map_key|invalid source|error in processing/i.test(trimmed.slice(0, 300))) {
     throw new Error(`${source}: ${trimmed.slice(0, 160)}`);
   }
 
-  const rows = parseCsv(text);
-  return rows.map((row, index) => normalizeRow(row, source, index)).filter(Boolean);
+  return parseCsv(text).map((row, index) => normalizeRow(row, source, index)).filter(Boolean);
 }
 
 function normalizeRow(row, source, index) {
@@ -142,11 +143,9 @@ function normalizeRow(row, source, index) {
 
   const date = String(row.acq_date || "").trim();
   const rawTime = String(row.acq_time || "").trim().padStart(4, "0");
-  const hour = rawTime.slice(0, 2);
-  const minute = rawTime.slice(2, 4);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^\d{4}$/.test(rawTime)) return null;
 
-  const acquiredAt = `${date}T${hour}:${minute}:00Z`;
+  const acquiredAt = `${date}T${rawTime.slice(0, 2)}:${rawTime.slice(2, 4)}:00Z`;
   const frp = Number(row.frp);
 
   return {
@@ -162,6 +161,138 @@ function normalizeRow(row, source, index) {
     source: "NASA FIRMS",
     dataset: source
   };
+}
+
+function buildFireEvents(items) {
+  if (!items.length) return [];
+
+  const parent = items.map((_, i) => i);
+  const rank = items.map(() => 0);
+  const cellSize = 0.05;
+  const grid = new Map();
+
+  const find = i => {
+    while (parent[i] !== i) {
+      parent[i] = parent[parent[i]];
+      i = parent[i];
+    }
+    return i;
+  };
+
+  const union = (a, b) => {
+    let ra = find(a);
+    let rb = find(b);
+    if (ra === rb) return;
+    if (rank[ra] < rank[rb]) [ra, rb] = [rb, ra];
+    parent[rb] = ra;
+    if (rank[ra] === rank[rb]) rank[ra] += 1;
+  };
+
+  const keyFor = (lat, lon) => `${Math.floor(lat / cellSize)}:${Math.floor(lon / cellSize)}`;
+
+  for (let i = 0; i < items.length; i += 1) {
+    const item = items[i];
+    const gx = Math.floor(item.latitude / cellSize);
+    const gy = Math.floor(item.longitude / cellSize);
+    const itemTime = new Date(item.acquiredAt).getTime();
+
+    for (let dx = -1; dx <= 1; dx += 1) {
+      for (let dy = -1; dy <= 1; dy += 1) {
+        const bucket = grid.get(`${gx + dx}:${gy + dy}`) || [];
+        for (const j of bucket) {
+          const other = items[j];
+          const timeDiff = Math.abs(itemTime - new Date(other.acquiredAt).getTime()) / 3600000;
+          if (timeDiff > EVENT_TIME_HOURS) continue;
+          if (haversineKm(item.latitude, item.longitude, other.latitude, other.longitude) <= EVENT_DISTANCE_KM) {
+            union(i, j);
+          }
+        }
+      }
+    }
+
+    const key = keyFor(item.latitude, item.longitude);
+    if (!grid.has(key)) grid.set(key, []);
+    grid.get(key).push(i);
+  }
+
+  const groups = new Map();
+  for (let i = 0; i < items.length; i += 1) {
+    const root = find(i);
+    if (!groups.has(root)) groups.set(root, []);
+    groups.get(root).push(items[i]);
+  }
+
+  return [...groups.values()].map((group, index) => summarizeEvent(group, index));
+}
+
+function summarizeEvent(group, index) {
+  const lat = group.reduce((sum, d) => sum + d.latitude, 0) / group.length;
+  const lon = group.reduce((sum, d) => sum + d.longitude, 0) / group.length;
+  const times = group.map(d => new Date(d.acquiredAt).getTime()).filter(Number.isFinite);
+  const firstSeenMs = Math.min(...times);
+  const lastSeenMs = Math.max(...times);
+  const sensors = [...new Set(group.map(d => d.satellite))];
+  const instruments = [...new Set(group.map(d => d.instrument))];
+  const highCount = group.filter(d => d.confidence === "high").length;
+  const nominalCount = group.filter(d => d.confidence === "nominal").length;
+  const frps = group.map(d => d.frp).filter(Number.isFinite);
+  const maxFrp = frps.length ? Math.max(...frps) : null;
+  const meanFrp = frps.length ? frps.reduce((a, b) => a + b, 0) / frps.length : null;
+  const durationHours = Math.max(0, (lastSeenMs - firstSeenMs) / 3600000);
+
+  let score = 15;
+  if (group.length >= 2) score += 15;
+  if (group.length >= 5) score += 10;
+  if (group.length >= 10) score += 5;
+  if (sensors.length >= 2) score += 20;
+  if (sensors.length >= 3) score += 8;
+  if (highCount >= 1) score += 15;
+  if (highCount >= 3) score += 5;
+  if (maxFrp !== null && maxFrp >= 20) score += 8;
+  if (maxFrp !== null && maxFrp >= 50) score += 4;
+  if (durationHours >= 1) score += 5;
+  score = Math.min(95, score);
+
+  let classification = "thermal_anomaly";
+  let label = "Anomali panas";
+  if (score >= 75) {
+    classification = "very_likely_fire";
+    label = "Sangat mungkin kebakaran";
+  } else if (score >= 50) {
+    classification = "strong_fire_indication";
+    label = "Indikasi kuat kebakaran";
+  }
+
+  return {
+    id: `event-${lastSeenMs}-${index}-${lat.toFixed(4)}-${lon.toFixed(4)}`,
+    latitude: Number(lat.toFixed(6)),
+    longitude: Number(lon.toFixed(6)),
+    firstSeen: new Date(firstSeenMs).toISOString(),
+    lastSeen: new Date(lastSeenMs).toISOString(),
+    durationHours: Number(durationHours.toFixed(1)),
+    detectionCount: group.length,
+    sensors,
+    instruments,
+    highConfidenceCount: highCount,
+    nominalConfidenceCount: nominalCount,
+    maxFrp: maxFrp === null ? null : Number(maxFrp.toFixed(1)),
+    meanFrp: meanFrp === null ? null : Number(meanFrp.toFixed(1)),
+    score,
+    classification,
+    label,
+    verification: "unverified",
+    verifiedBy: null,
+    verifiedAt: null
+  };
+}
+
+function haversineKm(lat1, lon1, lat2, lon2) {
+  const toRad = deg => deg * Math.PI / 180;
+  const r = 6371;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return 2 * r * Math.asin(Math.sqrt(a));
 }
 
 function normalizeSatellite(value, source) {
@@ -222,15 +353,11 @@ function parseCsvLine(line) {
       if (quoted && line[i + 1] === '"') {
         current += '"';
         i += 1;
-      } else {
-        quoted = !quoted;
-      }
+      } else quoted = !quoted;
     } else if (char === "," && !quoted) {
       values.push(current);
       current = "";
-    } else {
-      current += char;
-    }
+    } else current += char;
   }
   values.push(current);
   return values;
